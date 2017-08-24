@@ -100,14 +100,16 @@ use std::cmp::Ordering;
 
 
 /// An instance of a problem to be solved using an evolutionary strategy.
-pub trait Problem: Clone {
-    type Individual: Clone;
+pub trait Problem {
+    type Individual: CloneMut;
 
     /// Create an initial population of `count` individuals.
     fn initialize<R>(&mut self, count: usize, rng: &mut R) -> Vec<Self::Individual> where R: Rng;
 
+
     /// Mutate an individual. Should return true if the individual's fitness may have changed.
     fn mutate<R>(&mut self, &mut Self::Individual, rng: &mut R) -> bool where R: Rng;
+
 
     /// Compare two individuals by fitness.
     /// If None is returned, the `Engine` will choose a more fit individual randomly.
@@ -118,9 +120,15 @@ pub trait Problem: Clone {
                   -> Option<cmp::Ordering>
         where R: Rng;
 
+
     /// Checks if an individual is optimal.
     fn is_optimal(&mut self, _individual: &Self::Individual) -> bool {
         return false;
+    }
+
+
+    /// Run some maintenance on the `Problem` and population.
+    fn maintain<R>(&mut self, _population: Population<Self::Individual>, _rng: &mut R) where R: Rng {
     }
 }
 
@@ -158,11 +166,51 @@ pub struct PopulationIter<'a, I: 'a> {
     slice_iter: slice::Iter<'a, I>,
 }
 
-impl<'a, I> Iterator for PopulationIter<'a, I> {
+impl<'a, I: 'a> Clone for PopulationIter<'a, I> {
+    fn clone(&self) -> Self {
+        PopulationIter { slice_iter: self.slice_iter.as_slice().iter() }
+    }
+}
+
+impl<'a, I: 'a> Iterator for PopulationIter<'a, I> {
     type Item = &'a I;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.slice_iter.next()
+    }
+}
+
+/// Iterator over an `Engine`'s population.
+/// Returned by `Engine::population_mut()`.
+pub struct PopulationIterMut<'a, I: 'a> {
+    slice_iter: slice::IterMut<'a, I>,
+}
+
+impl<'a, I: 'a> PopulationIterMut<'a, I> {
+    pub fn unmut(self) -> PopulationIter<'a, I> {
+        PopulationIter { slice_iter: self.slice_iter.into_slice().iter() }
+    }
+}
+
+impl<'a, I: 'a> Iterator for PopulationIterMut<'a, I> {
+    type Item = &'a mut I;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.slice_iter.next()
+    }
+}
+
+pub struct Population<'a, I: 'a> {
+    slice: &'a mut [I],
+}
+
+impl<'a, I: 'a> Population<'a, I> {
+    pub fn iter_mut<'b>(&'b mut self) -> PopulationIterMut<'b, I> {
+        PopulationIterMut { slice_iter: self.slice.iter_mut() }
+    }
+
+    pub fn iter<'b>(&'b self) -> PopulationIter<'b, I> {
+        PopulationIter { slice_iter: self.slice.iter() }
     }
 }
 
@@ -184,8 +232,10 @@ impl<P: Problem, R: Rng> Engine<P, R> {
     /// offspring.
     fn produce_offspring(&mut self, offspring_count: usize) {
         for _ in 0..offspring_count {
-            let parent = self.rng.choose(&self.previous_generation).unwrap();
-            let mut child = parent.clone();
+            let parent = self.rng
+                .choose_mut(&mut self.previous_generation)
+                .unwrap();
+            let mut child = parent.clone_mut();
             self.needs_sort |= self.problem.mutate(&mut child, &mut self.rng);
             self.population.push(child);
         }
@@ -193,8 +243,10 @@ impl<P: Problem, R: Rng> Engine<P, R> {
 
     /// Copy the previous generation into the population.
     fn copy_previous_generation(&mut self) {
-        self.population
-            .extend_from_slice(&self.previous_generation);
+        self.population = self.previous_generation
+            .iter_mut()
+            .map(|i| i.clone_mut())
+            .collect();
     }
 
     /// Reduce the population size to that required by the strategy.
@@ -234,12 +286,18 @@ impl<P: Problem, R: Rng> Engine<P, R> {
         }
     }
 
+    /// Call maintain on the Problem until it is done, passing in the `Engine`'s population and rng.
+    pub fn maintain(&mut self) {
+        let population = Population { slice: &mut self.population };
+        self.problem.maintain(population, &mut self.rng);
+    }
+
     /// Searches the population for an optimal individual.
     /// Take O(|population|) time.
     pub fn optimal(&mut self) -> Option<P::Individual> {
-        for individual in &self.population {
+        for individual in &mut self.population {
             if self.problem.is_optimal(individual) {
-                return Some(individual.clone());
+                return Some(individual.clone_mut());
             }
         }
         return None;
@@ -256,6 +314,11 @@ impl<P: Problem, R: Rng> Engine<P, R> {
         PopulationIter { slice_iter: self.population.iter() }
     }
 
+    /// Iterate over individuals from most fit to least fit.
+    pub fn population_mut(&mut self) -> PopulationIterMut<P::Individual> {
+        PopulationIterMut { slice_iter: self.population.iter_mut() }
+    }
+
     /// Access the Problem passed to the Engine.
     pub fn problem(&self) -> &P {
         &self.problem
@@ -264,6 +327,19 @@ impl<P: Problem, R: Rng> Engine<P, R> {
     /// Mutably access the Problem passed to the Engine.
     pub fn mut_problem(&mut self) -> &mut P {
         &mut self.problem
+    }
+}
+
+/// Similar trait to Clone, but taking a mutable reference instead.
+pub trait CloneMut {
+    fn clone_mut(&mut self) -> Self;
+}
+
+impl<T> CloneMut for T
+    where T: Clone
+{
+    fn clone_mut(&mut self) -> Self {
+        self.clone()
     }
 }
 
